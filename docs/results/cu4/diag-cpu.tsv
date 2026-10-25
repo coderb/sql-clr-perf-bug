@@ -1,0 +1,9 @@
+Variant	DopAsked	DopUsed	ElapsedMs	CpuMs
+AddOne	4	4	112	434
+AddOne	24	24	732	16527
+IsMarked4000	4	4	181	615
+IsMarked4000	24	24	737	16465
+IsMarkedMax	4	4	1569	4765
+IsMarkedMax	24	24	2551	52367
+control	4	4	24	87
+control	24	24	10	182

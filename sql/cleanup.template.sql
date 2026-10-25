@@ -1,0 +1,2 @@
+-- Removes what the repro scripts create, for a run that stopped partway: database ClrSpinRepro and
+-- every assembly trust they added. The last result set shows what is left, both 0 when done.

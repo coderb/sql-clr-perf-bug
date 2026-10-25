@@ -1,0 +1,2 @@
+Version	CpuCount	VisibleOnlineSchedulers	MaxDop	CostThreshold	ClrEnabled	ClrStrictSecurity
+Microsoft SQL Server 2025 (RTM-CU4) (KB5081495) - 17.0.4035.5 (X64) Mar 29 2026 15:22:28 Copyright (C) 2025 Microsoft Corporation Enterprise Developer Edition (64-bit) on Linux (Ubuntu 26.04.1 LTS) <X64>	24	24	0	5	1	0
