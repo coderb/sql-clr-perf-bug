@@ -1,7 +1,9 @@
 # SQLCLR scalar functions scale badly in parallel plans
 
-**Reported to Microsoft:** [the report on the SQL Server feedback forum](https://feedback.azure.com/d365community/idea/e17dc3c3-8dd0-f111-aad1-6045bdb0c81c). If this affects you
-too, vote for it there.
+**Reported to Microsoft:**
+
+- [The report on the SQL Server feedback forum](https://feedback.azure.com/d365community/idea/e17dc3c3-8dd0-f111-aad1-6045bdb0c81c). If this affects you too, vote for it there.
+- [The question on Microsoft Q&A](https://learn.microsoft.com/en-us/answers/questions/6049424/sqlclr-scalar-function-spins-on-diag-object-at-hig).
 
 A reproduction for SQL Server 2025: a trivial SQLCLR scalar function, called once per row in a
 parallel plan, costs 23 to 36 times as much CPU per call at DOP 24 as at DOP 4, and the query runs
