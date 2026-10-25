@@ -28,6 +28,9 @@ We found it in production: a statement calling a SQLCLR function, with `nvarchar
 for 1.4 million rows. On CU10 it takes 36.1 s of CPU at DOP 24 and 4.4 s at DOP 4, and finishes
 faster at DOP 4 (1.0 to 1.1 s against 1.7 s); on CU4, 42.6 s and 4.4 s.
 
+Reported to Microsoft on the SQL Server feedback forum:
+<https://feedback.azure.com/d365community/idea/e17dc3c3-8dd0-f111-aad1-6045bdb0c81c>
+
 ## Environment
 
 ```
