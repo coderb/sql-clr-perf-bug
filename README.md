@@ -37,11 +37,13 @@ in SSMS or `sqlcmd`, on a server that is otherwise idle, since the spinlock coun
 | [`repro.sql`](sql/repro.sql) | every function at DOP 1, 2, 4, 8, 16 and the maximum | 3 minutes |
 | [`diag.sql`](sql/diag.sql) | every spinlock, latch class and wait type that changes, at DOP 4 and the maximum | 1 minute |
 | [`diagconfig.sql`](sql/diagconfig.sql) | `DIAG_OBJECT` with lightweight query profiling and Query Store on and off | 1 minute |
+| [`threads.sql`](sql/threads.sql) | how `AddOne`'s rows and CPU divide among the threads of its plan, at DOP 4 up to the maximum | 1 minute |
 
 Each script creates database `ClrSpinRepro`, trusts its one assembly by hash with
 `sys.sp_add_trusted_assembly`, runs, then drops the database, disconnecting any other session still
-in it, and removes the trust. It changes no server setting, and stops before creating anything if
-CLR is disabled or `ClrSpinRepro` already exists. If a run stops partway,
+in it, and removes the trust. `threads.sql` also runs Extended Events session `ClrSpinReproThreads`
+for the length of its test and drops it. No script changes a server setting, and each stops before
+creating anything if CLR is disabled or `ClrSpinRepro` already exists. If a run stops partway,
 [`cleanup.sql`](sql/cleanup.sql) removes what it made.
 
 SSMS runs every batch even after one fails, so a failed check turns on `noexec`: the rest of the
