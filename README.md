@@ -39,7 +39,7 @@ in SSMS or `sqlcmd`, on a server that is otherwise idle, since the spinlock coun
 | [`diagconfig.sql`](sql/diagconfig.sql) | `DIAG_OBJECT` with lightweight query profiling and Query Store on and off | 1 minute |
 | [`threads.sql`](sql/threads.sql) | how `AddOne`'s rows and CPU divide among the threads of its plan, at DOP 4 up to the maximum | 1 minute |
 | [`split.sql`](sql/split.sql) | `AddOne`'s rows spread across 1, 4 and 24 separately declared copies of it, at DOP 4 up to the maximum | 1 minute |
-| [`sqlchars.sql`](sql/sqlchars.sql) | `nvarchar(max)` arguments taken as `string`, `SqlString` and a streamed `SqlChars`, in a trivial check and in a real parser, with the memory each allocates | 5 minutes |
+| [`sqlchars.sql`](sql/sqlchars.sql) | `nvarchar(max)` arguments taken as `string`, `SqlString` and a streamed `SqlChars`, in a trivial check and in a real parser, with the memory each allocates | 8 minutes |
 
 Each script creates database `ClrSpinRepro`, trusts its one assembly by hash with
 `sys.sp_add_trusted_assembly`, runs, then drops the database, disconnecting any other session still

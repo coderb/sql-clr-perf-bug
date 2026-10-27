@@ -90,7 +90,8 @@ go
 -- same check, with nvarchar(max) parameters, taken as a string, as a SqlString and as a SqlChars, which
 -- streams the value rather than copy it; nvarchar(4000) parameters taken as a string set the floor. At
 -- DOP 1 up to the machine's maximum, recording the spinlocks an nvarchar(max) argument spins on and the
--- CLR's own count of memory allocated.
+-- CLR's own count of memory allocated. Pass by pass, the variants run back to back at each DOP in an
+-- order that rotates each pass, so a busy moment on the server falls on all of them alike.
 
 create function dbo.IsMarkedSqlMax(@group nvarchar(max), @code nvarchar(max)) returns bit
 as external name ClrSpin.[ClrSpin.Functions].IsMarkedSql;
@@ -130,8 +131,8 @@ declare @n int, @t0 datetime2(7), @elapsed int, @alloc0 bigint;
 
 declare c cursor local fast_forward for
 select V.Variant, V.Predicate, D.Dop, R.Run
-from @variants V cross join @dops D cross join (values (1), (2), (3)) R(Run)
-order by V.Ord, D.Dop, R.Run;
+from @variants V cross join @dops D cross join (values (1), (2), (3), (4), (5)) R(Run)
+order by R.Run, D.Dop, (V.Ord + R.Run) % 4;
 open c;
 fetch c into @variant, @predicate, @dop, @run;
 while @@fetch_status = 0 begin
@@ -165,13 +166,15 @@ close c;
 deallocate c;
 go
 
--- run 1 of each warms the plan; runs 2 and 3 are averaged
+-- pass 1 warms the plans; passes 2 to 5 are averaged, beside each point's lowest and highest CPU
 select
     Variant,
     DopAsked,
     DopUsed = max(DopUsed),
     ElapsedMs = avg(ElapsedMs),
     CpuMs = avg(CpuMs),
+    MinCpuMs = min(CpuMs),
+    MaxCpuMs = max(CpuMs),
     CpuUsPerRow = convert(decimal(9, 2), avg(CpuMs) * 1000.0 / 2000000),
     AllocKb = avg(AllocKb),
     AllocBytesPerRow = convert(decimal(9, 1), avg(AllocKb) * 1024.0 / 2000000),
@@ -189,7 +192,7 @@ go
 -- a parcel table's legal descriptions: half are 56 characters or fewer, 1 in 100 over 566, 1 in 1,000
 -- over 1,651, the longest 5,120, and 1 in 50 ends in a match. CPU, spins and the CLR's own count of
 -- memory allocated, at DOP 1 up to the machine's maximum, after a check that every variant returns what
--- the string parser does.
+-- the string parser does. The variants run interleaved, as in the trivial check's part.
 
 create function dbo.ParseMaxAll(@s nvarchar(max), @startDelim nvarchar(max), @endDelim nvarchar(max)) returns nvarchar(max)
 as external name ClrSpin.[ClrSpin.Functions].ParseFromEnd;
@@ -278,8 +281,8 @@ declare @n int, @t0 datetime2(7), @elapsed int, @alloc0 bigint;
 
 declare c cursor local fast_forward for
 select V.Variant, V.Fn, D.Dop, R.Run
-from @variants V cross join @dops D cross join (values (1), (2), (3)) R(Run)
-order by V.Ord, D.Dop, R.Run;
+from @variants V cross join @dops D cross join (values (1), (2), (3), (4), (5)) R(Run)
+order by R.Run, D.Dop, (V.Ord + R.Run) % 4;
 open c;
 fetch c into @variant, @fn, @dop, @run;
 while @@fetch_status = 0 begin
@@ -313,13 +316,15 @@ close c;
 deallocate c;
 go
 
--- run 1 of each warms the plan; runs 2 and 3 are averaged
+-- pass 1 warms the plans; passes 2 to 5 are averaged, beside each point's lowest and highest CPU
 select
     Variant,
     DopAsked,
     DopUsed = max(DopUsed),
     ElapsedMs = avg(ElapsedMs),
     CpuMs = avg(CpuMs),
+    MinCpuMs = min(CpuMs),
+    MaxCpuMs = max(CpuMs),
     CpuUsPerRow = convert(decimal(9, 2), avg(CpuMs) * 1000.0 / 2000000),
     AllocKb = avg(AllocKb),
     AllocBytesPerRow = convert(decimal(9, 1), avg(AllocKb) * 1024.0 / 2000000),
