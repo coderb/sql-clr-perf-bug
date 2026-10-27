@@ -127,6 +127,8 @@ The scripts:
   to divide its rows and CPU among the threads.
 - **[`sql/split.sql`](../sql/split.sql):** `AddOne`'s rows spread by ID across 1, 4 and 24 separately declared SQL functions
   over the same method, at DOP 4, 8, 12, 16, 20 and 24.
+- **[`sql/sqlchars.sql`](../sql/sqlchars.sql):** `nvarchar(max)` arguments taken as `string`, `SqlString` and a streamed
+  `SqlChars`, in a trivial check and in a real parser, at DOP 1, 4, 8 and 24.
 
 The spinlock counters are server-wide, so a busy server adds noise. In our runs, the three runs of
 each test agreed closely.
@@ -134,9 +136,10 @@ each test agreed closely.
 ## Results
 
 Three runs of each test on CU10, with CU4's figures noted where they differ most. The raw output is
-in [`results/cu10`](results/cu10) and [`results/cu4`](results/cu4). Both sets of runs used a build
-of the same source that also carried debug information; the scripts in `sql/` embed a build without
-it.
+in [`results/cu10`](results/cu10) and [`results/cu4`](results/cu4). The runs of `repro.sql`, `diag.sql`
+and `diagconfig.sql` used a build that also carried debug information, and every run before
+`sqlchars.sql` a build without the methods it added. The scripts in `sql/` embed a build without debug
+information, whose added methods leave unchanged the ones the other scripts call.
 
 ### CPU per call by DOP (`repro.sql`)
 
@@ -278,6 +281,49 @@ CPU in ms, runs 2 and 3 averaged, on CU10:
 - **Each row calls one copy,** since `case` evaluates only the branch that matches.
   `sys.dm_exec_function_stats` could have confirmed the split by call counts, but on this server it
   lists no CLR function, only T-SQL ones.
+
+### Taking an `nvarchar(max)` argument as `SqlChars` (`sqlchars.sql`)
+
+Taking an `nvarchar(max)` argument as a `SqlChars`, which streams the value instead of copying it into a
+string, does not avoid what an `nvarchar(max)` argument costs: it spins on the same
+`SOS_SELIST_SIZED_SLOCK` and `SOS_CACHESTORE`, at about the same CPU. It does allocate less. What pays
+is declaring the parameters with a size.
+
+The trivial check on `T`'s short codes, on CU10, runs 2 and 3 averaged:
+
+| Method takes | Declared | CPU per call, DOP 1 (µs) | Allocated per call (bytes) | CPU per call, DOP 24 (µs) | Spins at DOP 24 (M) |
+|---|---|---|---|---|---|
+| `string` | `nvarchar(max)` | 1.43 | 570 | 23.95 | `SOS_SELIST_SIZED_SLOCK` 591.8 |
+| `SqlString` | `nvarchar(max)` | 1.47 | 570 | 24.08 | `SOS_SELIST_SIZED_SLOCK` 613.2 |
+| `SqlChars` | `nvarchar(max)` | 1.38 | 401 | 23.84 | `SOS_SELIST_SIZED_SLOCK` 580.4 |
+| `string` | `nvarchar(4000)` | 0.21 | 88 | 7.88 | `DIAG_OBJECT` 177.4 |
+
+Against the `string` version, the `SqlChars` one took 4% less CPU at DOP 1 and 1% less at DOP 24. At DOP
+4 and 8 it took 6% less and 15% more, but these runs went one variant after another, so a busier moment
+on the server fell on one variant alone, and those two figures settle no difference. Its method reads one
+character and allocates nothing itself, so its 401
+bytes a call are the engine's, for an `nvarchar(max)` argument.
+
+A real parser: the text between the last `endDelim` and the last `startDelim` before it, called with
+`' '` and `'ND ADD'`, over 2,000,000 descriptions shaped like a county parcel table's legal
+descriptions. Half are 56 characters or fewer, 1 in 100 over 566, the longest 5,120, and 1 in 50 ends in
+a match. The `SqlChars` version reads the value backward through one window of at most 262 characters.
+Every version returned what the all-`nvarchar(max)` one does, on every row; no description over 4,000
+characters ends in a match, so this shows nothing about cutting one short.
+
+| Declared: text, delimiters | Method takes | CPU per call, DOP 1 (µs) | Allocated per call (bytes) | CPU per call, DOP 24 (µs) |
+|---|---|---|---|---|
+| `max`, `max` | `string` | 2.25 | 1,359 | 24.84 |
+| `max`, `4000` | `string` | 1.88 | 886 | 26.31 |
+| `max`, `4000` | `SqlChars` | 1.80 | 630 | 25.94 |
+| `4000`, `4000` | `string` | 0.54 | 322 | 8.12 |
+
+Each `nvarchar(max)` parameter costs on every call, whatever it holds: declaring the two delimiters with
+a size took 16% off the CPU and 35% off the allocation at DOP 1. Streaming took a further 4% and 29% at
+DOP 1; from DOP 4 up, the `SqlChars` version was within 4% of the `string` one either way.
+
+Allocation is the change in `sys.dm_clr_appdomains.total_allocated_memory_kb` for the repro database
+across each run.
 
 ## What we would like to know
 

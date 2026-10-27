@@ -1,0 +1,362 @@
+-- SQLCLR scalar functions in a parallel plan: CPU per call grows far faster than the thread count,
+-- with heavy spinning on SOS_SELIST_SIZED_SLOCK and SOS_CACHESTORE.
+--
+-- Run as sysadmin, on an otherwise idle server: the spinlock counters are server-wide. The script
+-- creates database ClrSpinRepro, trusts its one assembly by hash for the length of the run, and removes
+-- both at the end; it changes no server setting. Run cleanup.sql if it stops partway.
+--
+-- Each function does a few character or integer comparisons, so any cost beyond that is the cost of
+-- calling it. The control runs the same scan with the check written in T-SQL.
+
+set nocount on;
+go
+
+select
+    Version = @@version,
+    CpuCount = (select cpu_count from sys.dm_os_sys_info),
+    VisibleOnlineSchedulers = (select count(*) from sys.dm_os_schedulers where status = 'VISIBLE ONLINE'),
+    MaxDop = (select value_in_use from sys.configurations where name = 'max degree of parallelism'),
+    CostThreshold = (select value_in_use from sys.configurations where name = 'cost threshold for parallelism'),
+    ClrEnabled = (select value_in_use from sys.configurations where name = 'clr enabled'),
+    ClrStrictSecurity = (select value_in_use from sys.configurations where name = 'clr strict security');
+go
+
+-- SSMS runs every batch even after one fails, so a failed check turns on noexec, which compiles the rest
+-- of the script and runs none of it; reconnect afterwards, or run set noexec off
+if (select convert(int, value_in_use) from sys.configurations where name = 'clr enabled') = 0 begin
+    raiserror('clr enabled is 0; this script does not change server settings. Stopping.', 16, 1);
+    set noexec on;
+end
+go
+
+if db_id(N'ClrSpinRepro') is not null begin
+    raiserror('database ClrSpinRepro already exists; run cleanup.sql first. Stopping.', 16, 1);
+    set noexec on;
+end
+go
+
+create database ClrSpinRepro;
+go
+use ClrSpinRepro;
+go
+if db_name() != N'ClrSpinRepro' begin
+    raiserror('not in database ClrSpinRepro; stopping before anything is created', 16, 1);
+    set noexec on;
+end
+go
+
+declare @hash varbinary(64) = 0xab75fea39d156638f73903df82f2219ac6b39ece320244db53f7898ca190e1ff625db7a3d69293d9e3ad715f5b2ba710e5742bd486d1e6c0a3e0874dfc6c6b06;
+if not exists (select * from sys.trusted_assemblies where hash = @hash)
+    exec sys.sp_add_trusted_assembly @hash = @hash, @description = N'ClrSpinRepro';
+go
+
+create assembly ClrSpin from 0x4d5a90000300000004000000ffff0000b800000000000000400000000000000000000000000000000000000000000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd21546869732070726f6772616d2063616e6e6f742062652072756e20696e20444f53206d6f64652e0d0d0a2400000000000000504500004c01030055c1959b0000000000000000e00022200b0130000010000000060000000000008e2e00000020000000400000000000100020000000020000040000000000000006000000000000000080000000020000000000000300608500001000001000000000100000100000000000001000000000000000000000003c2e00004f000000004000000803000000000000000000000000000000000000006000000c000000202e00001c0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000200000080000000000000000000000082000004800000000000000000000002e74657874000000940e0000002000000010000000020000000000000000000000000000200000602e7273726300000008030000004000000004000000120000000000000000000000000000400000402e72656c6f6300000c0000000060000000020000001600000000000000000000000000004000004200000000000000000000000000000000702e0000000000004800000002000500ec220000340b000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001e02280e00000a2a3a02280e00000a02037d010000042a00133002002a00000001000011032c1d036f0f00000a19310d03196f1000000a1f4dfe012b0116731100000a2a1200fe150100001b062a00001330020034000000020000110f01281200000a2c067e1300000a2a0f01281400000a0a066f0f00000a19310d06196f1000000a1f4dfe012b0116281500000a2a133002003100000001000011036f1600000a2d1f036f1700000a196a310e03196a6f1800000a1f4dfe012b0116731100000a2a1200fe150100001b062a120217582a0000133004004700000003000011022d02142a02041a6f1900000a0a06172f02142a06036f0f00000a590b07162f02142a0203071a6f1a00000a0b07153302142a07036f0f00000a580b02070607596f1b00000a2a0013300500d100000004000011026f1600000a2c02142a036f0f00000a2c08046f0f00000a2d17026f1c00000a13061206281400000a030428070000062a2000010000036f0f00000a046f0f00000a281d00000a586a026f1700000a281e00000a698d1b0000010a020604026f1700000a28090000060b07176a2f02142a07036f0f00000a6a590c08166a2f02142a02060308176a5828090000060d09156a3302142a09036f0f00000a6a580d0709596913041104068e69310911048d1b0000012b01061305020911051611046f1f00000a261105161104732000000a2a000000133005008600000005000011050a2b75166a06038e696a59282100000a0b060759690c02070316086f1f00000a2608046f0f00000a590d2b381613042b061104175813041104046f0f00000a2f100309110458930411046f1000000a2ee01104046f0f00000a330507096a582a0917590d09162fc4072c1707046f0f00000a6a58176a590a06046f0f00000a6a2f81156a2a000042534a4201000100000000000c00000076342e302e33303331390000000005006c000000ac030000237e000018040000e803000023537472696e67730000000000080000040000002355530004080000100000002347554944000000140800002003000023426c6f620000000000000002000001571502080900000000fa013300160000010000001b0000000400000001000000090000001100000021000000160000000500000001000000010000000200000000004e020100000000000600820116030600d40116030600af0003030f00360300000600da000e020600bb01b40206003601b4020600f300b40206001001b4020600a201b4020600c300b40206007c0016030600e8017a020600ae037a02060097007a020600bf037a020a005501e2020a004f00e2020a004900e202060001007a020a00950245030a002a0245030a00a503450306002d027a020600c6027a0206003e027a020600dd027a02000000000c000000000001000100000110006a005a03350001000100000110006a011603350001000200810110007103a4024100020003002600ac02b1005020000000008618fd02060001005820000000008618fd020100010068200000000096002f00b4000100a0200000000096006502be000300e0200000000096008503c70005001d210000000096006300d300070024210000000096003800d800080078210000000096009303df000b005822000000009100d203e7000e0000000100d702000002005e0000000100d702000002005e0000000100d702000002005e0000000100e40300000100bd03000002008a0200000300810200000100bd03000002008a0200000300810200000100bd0300000200db0300000300fc010000040045000900fd0201001100fd0206001900fd020a002900fd0210003100fd0210003900fd0210004100fd0210004900fd0210005100fd0210005900fd0210006100fd0206007900fd0215008900fd0206006900fd020600c10043022300c1007b0327000c00fd023200b1005a023c00a90060024000b100f2014400a900c6034800b9005a023c00b90043024e00b90071025200c10002025c00c10002026300c10034026b00b90028027e00d100e2038300d100a0028900b9002a008f00c100fd029800d100e20389002700120016032e000b00f1002e001300fa002e001b0019012e00230022012e002b0070012e0033007d012e003b008a012e00430097012e004b0070012e005300700143005b00ea0243000a00ea0260006b00a20163005b00ea0263000a00ea0263006300ef0280006b00a201a0006b00a201c0006b00a201e0006b00a20100016b00a2011b00380057007100a0002c00048000000100000000000000000000000000a4020000040000000000000000000000a800210000000000040000000000000000000000a8001500000000000000004e756c6c61626c656031003c4d6f64756c653e0053797374656d2e44617461006d73636f726c696200526561640049734d61726b656400506172736546726f6d456e6400656e640053797374656d446174614163636573734b696e6400636f6465004164644f6e6500456d62656464656441747472696275746500436f6d70696c657247656e6572617465644174747269627574650041747472696275746555736167654174747269627574650044656275676761626c6541747472696275746500417373656d626c795469746c65417474726962757465005461726765744672616d65776f726b41747472696275746500417373656d626c7946696c6556657273696f6e41747472696275746500417373656d626c79496e666f726d6174696f6e616c56657273696f6e41747472696275746500417373656d626c79436f6e66696775726174696f6e4174747269627574650053716c46756e6374696f6e4174747269627574650052656653616665747952756c657341747472696275746500436f6d70696c6174696f6e52656c61786174696f6e7341747472696275746500417373656d626c7950726f6475637441747472696275746500417373656d626c79436f6d70616e794174747269627574650052756e74696d65436f6d7061746962696c697479417474726962757465006765745f56616c75650076616c7565004c617374496e6465784f660053797374656d2e52756e74696d652e56657273696f6e696e6700546f53716c537472696e6700537562737472696e67004d617468006765745f4c656e67746800436c725370696e2e646c6c006765745f49734e756c6c0049734d61726b656453716c006765745f4974656d0053797374656d00656e6444656c696d00737461727444656c696d0053716c426f6f6c65616e004d696e00436c725370696e0056657273696f6e0053797374656d2e5265666c656374696f6e00537472696e67436f6d70617269736f6e0067726f75700043686172004d6963726f736f66742e53716c5365727665722e536572766572002e63746f720053797374656d2e446961676e6f73746963730053797374656d2e52756e74696d652e436f6d70696c6572536572766963657300446562756767696e674d6f6465730053797374656d2e446174612e53716c5479706573004d6963726f736f66742e436f6465416e616c797369730046756e6374696f6e73006765745f43686172730049734d61726b6564436861727300506172736546726f6d456e6443686172730053716c43686172730041747472696275746554617267657473004f626a656374006f705f496d706c696369740046696e644c6173740077696e646f77004d617800000000000000ba22deae0fe8084f928b68e2d667ba6000042001010803200001052001011111042001010e05200101113907070115115101020320000804200103080515115101020520010113000307010e03200002030611550320000e0500011155020320000a042001030a0407020808062002080e1165072003080e0811650520020e08080c07071d030a0a0a081d03115904200011590500020808080500020a0a0a0820040a0a1d030808072003011d0308080707050a0a08080808b77a5c561934e08902060809000215115101020e0e0800021155115911590b00021511510102125d125d04000108080600030e0e0e0e0700030e125d0e0e0900040a125d1d030e0a0801000800000000001e01000100540216577261704e6f6e457863657074696f6e5468726f7773010801000200000000004d01001c2e4e45544672616d65776f726b2c56657273696f6e3d76342e372e320100540e144672616d65776f726b446973706c61794e616d65142e4e4554204672616d65776f726b20342e372e320c010007436c725370696e00000c01000752656c6561736500000c010007312e302e302e3000000a010005312e302e30000081460100040054020f497344657465726d696e697374696301540209497350726563697365015455794d6963726f736f66742e53716c5365727665722e5365727665722e446174614163636573734b696e642c2053797374656d2e446174612c2056657273696f6e3d342e302e302e302c2043756c747572653d6e65757472616c2c205075626c69634b6579546f6b656e3d623737613563353631393334653038390a446174614163636573730000000054557f4d6963726f736f66742e53716c5365727665722e5365727665722e53797374656d446174614163636573734b696e642c2053797374656d2e446174612c2056657273696f6e3d342e302e302e302c2043756c747572653d6e65757472616c2c205075626c69634b6579546f6b656e3d623737613563353631393334653038391053797374656d4461746141636365737300000000040100000026010002000000020054020d416c6c6f774d756c7469706c6500540209496e68657269746564000801000b00000000000000000000000000000000000010000000000000000000000000000000642e000000000000000000007e2e0000002000000000000000000000000000000000000000000000702e0000000000000000000000005f436f72446c6c4d61696e006d73636f7265652e646c6c0000000000ff25002000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100100000001800008000000000000000000000000000000100010000003000008000000000000000000000000000000100000000004800000058400000ac0200000000000000000000ac0234000000560053005f00560045005200530049004f004e005f0049004e0046004f0000000000bd04effe00000100000001000000000000000100000000003f000000000000000400000002000000000000000000000000000000440000000100560061007200460069006c00650049006e0066006f00000000002400040000005400720061006e0073006c006100740069006f006e00000000000000b0040c020000010053007400720069006e006700460069006c00650049006e0066006f000000e8010000010030003000300030003000340062003000000030000800010043006f006d00700061006e0079004e0061006d0065000000000043006c0072005300700069006e000000380008000100460069006c0065004400650073006300720069007000740069006f006e000000000043006c0072005300700069006e000000300008000100460069006c006500560065007200730069006f006e000000000031002e0030002e0030002e003000000038000c00010049006e007400650072006e0061006c004e0061006d006500000043006c0072005300700069006e002e0064006c006c0000002800020001004c006500670061006c0043006f00700079007200690067006800740000002000000040000c0001004f0072006900670069006e0061006c00460069006c0065006e0061006d006500000043006c0072005300700069006e002e0064006c006c000000300008000100500072006f0064007500630074004e0061006d0065000000000043006c0072005300700069006e000000300006000100500072006f006400750063007400560065007200730069006f006e00000031002e0030002e003000000038000800010041007300730065006d0062006c0079002000560065007200730069006f006e00000031002e0030002e0030002e0030000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002000000c000000903e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 with permission_set = safe;
+go
+
+-- the same method, declared with max and with sized parameters
+create function dbo.IsMarkedMax(@group nvarchar(max), @code nvarchar(max)) returns bit
+as external name ClrSpin.[ClrSpin.Functions].IsMarked;
+go
+create function dbo.IsMarked4000(@group nvarchar(4000), @code nvarchar(4000)) returns bit
+as external name ClrSpin.[ClrSpin.Functions].IsMarked;
+go
+create function dbo.IsMarkedSql(@group nvarchar(4000), @code nvarchar(4000)) returns bit
+as external name ClrSpin.[ClrSpin.Functions].IsMarkedSql;
+go
+create function dbo.AddOne(@x int) returns int
+as external name ClrSpin.[ClrSpin.Functions].AddOne;
+go
+
+-- 2,000,000 rows, a heap; one row in 20 has 'M' as its code's fourth character
+create table dbo.T (
+    ID int not null,
+    GroupName varchar(255) not null,
+    Code varchar(255) not null
+);
+
+with N as (
+    select top (2000000) n = row_number() over (order by (select null))
+    from sys.all_columns a cross join sys.all_columns b cross join sys.all_columns c
+)
+insert dbo.T with (tablock)
+select
+    n,
+    'G' + right('0' + convert(varchar(2), n % 67), 2),
+    stuff(right('000000000000' + convert(varchar(12), n), 12), 4, 1, case when n % 20 = 0 then 'M' else 'X' end)
+from N;
+go
+
+-- Diagnostic: whether an nvarchar(max) argument's cost depends on the type the method takes it as. The
+-- same check, with nvarchar(max) parameters, taken as a string, as a SqlString and as a SqlChars, which
+-- streams the value rather than copy it; nvarchar(4000) parameters taken as a string set the floor. At
+-- DOP 1 up to the machine's maximum, recording the spinlocks an nvarchar(max) argument spins on and the
+-- CLR's own count of memory allocated.
+
+create function dbo.IsMarkedSqlMax(@group nvarchar(max), @code nvarchar(max)) returns bit
+as external name ClrSpin.[ClrSpin.Functions].IsMarkedSql;
+go
+create function dbo.IsMarkedCharsMax(@group nvarchar(max), @code nvarchar(max)) returns bit
+as external name ClrSpin.[ClrSpin.Functions].IsMarkedChars;
+go
+
+create table #r (
+    Variant varchar(20) not null,
+    DopAsked int not null,
+    Run int not null,
+    DopUsed int null,
+    ElapsedMs int not null,
+    CpuMs int null,
+    AllocKb bigint null,
+    SelistSpins bigint null,
+    CachestoreSpins bigint null,
+    DiagSpins bigint null
+);
+select top 0 name, spins into #spin0 from sys.dm_os_spinlock_stats;
+go
+
+declare @variants table (Ord int not null primary key, Variant varchar(20) not null, Predicate nvarchar(200) not null);
+insert @variants values
+    (1, 'IsMarkedMax', N'dbo.IsMarkedMax(GroupName, Code) = 1'),
+    (2, 'IsMarkedSqlMax', N'dbo.IsMarkedSqlMax(GroupName, Code) = 1'),
+    (3, 'IsMarkedCharsMax', N'dbo.IsMarkedCharsMax(GroupName, Code) = 1'),
+    (4, 'IsMarked4000', N'dbo.IsMarked4000(GroupName, Code) = 1');
+
+declare @maxdop int = (select count(*) from sys.dm_os_schedulers where status = 'VISIBLE ONLINE');
+declare @dops table (Dop int not null primary key);
+insert @dops select distinct d from (values (1), (4), (8), (@maxdop)) v(d) where d <= @maxdop;
+
+declare @variant varchar(20), @predicate nvarchar(200), @dop int, @run int, @sql nvarchar(max), @marker nvarchar(100);
+declare @n int, @t0 datetime2(7), @elapsed int, @alloc0 bigint;
+
+declare c cursor local fast_forward for
+select V.Variant, V.Predicate, D.Dop, R.Run
+from @variants V cross join @dops D cross join (values (1), (2), (3)) R(Run)
+order by V.Ord, D.Dop, R.Run;
+open c;
+fetch c into @variant, @predicate, @dop, @run;
+while @@fetch_status = 0 begin
+    set @marker = N'/*clrspin sqlchars ' + @variant + N' dop' + convert(nvarchar(4), @dop) + N' run' + convert(nvarchar(4), @run) + N'*/';
+    set @sql = N'select @n = count(*) ' + @marker + N' from dbo.T where ' + @predicate
+        + N' option (maxdop ' + convert(nvarchar(4), @dop) + N', use hint (''ENABLE_PARALLEL_PLAN_PREFERENCE''))';
+
+    truncate table #spin0;
+    insert #spin0 select name, spins from sys.dm_os_spinlock_stats;
+    set @alloc0 = (select sum(total_allocated_memory_kb) from sys.dm_clr_appdomains where db_id = db_id());
+    set @t0 = sysdatetime();
+    exec sys.sp_executesql @sql, N'@n int output', @n = @n output;
+    set @elapsed = datediff(millisecond, @t0, sysdatetime());
+
+    insert #r
+    select
+        @variant, @dop, @run,
+        (select top 1 qs.last_dop from sys.dm_exec_query_stats qs cross apply sys.dm_exec_sql_text(qs.sql_handle) st
+            where st.text like N'%' + @marker + N'%' and st.text not like N'%dm_exec_query_stats%'),
+        @elapsed,
+        (select top 1 qs.last_worker_time / 1000 from sys.dm_exec_query_stats qs cross apply sys.dm_exec_sql_text(qs.sql_handle) st
+            where st.text like N'%' + @marker + N'%' and st.text not like N'%dm_exec_query_stats%'),
+        (select sum(total_allocated_memory_kb) from sys.dm_clr_appdomains where db_id = db_id()) - @alloc0,
+        (select s.spins - s0.spins from sys.dm_os_spinlock_stats s join #spin0 s0 on s0.name = s.name where s.name = 'SOS_SELIST_SIZED_SLOCK'),
+        (select s.spins - s0.spins from sys.dm_os_spinlock_stats s join #spin0 s0 on s0.name = s.name where s.name = 'SOS_CACHESTORE'),
+        (select s.spins - s0.spins from sys.dm_os_spinlock_stats s join #spin0 s0 on s0.name = s.name where s.name = 'DIAG_OBJECT');
+
+    fetch c into @variant, @predicate, @dop, @run;
+end
+close c;
+deallocate c;
+go
+
+-- run 1 of each warms the plan; runs 2 and 3 are averaged
+select
+    Variant,
+    DopAsked,
+    DopUsed = max(DopUsed),
+    ElapsedMs = avg(ElapsedMs),
+    CpuMs = avg(CpuMs),
+    CpuUsPerRow = convert(decimal(9, 2), avg(CpuMs) * 1000.0 / 2000000),
+    AllocKb = avg(AllocKb),
+    AllocBytesPerRow = convert(decimal(9, 1), avg(AllocKb) * 1024.0 / 2000000),
+    SelistSpins = avg(SelistSpins),
+    CachestoreSpins = avg(CachestoreSpins),
+    DiagSpins = avg(DiagSpins)
+from #r
+where Run > 1
+group by Variant, DopAsked
+order by min(case Variant when 'IsMarkedMax' then 1 when 'IsMarkedSqlMax' then 2 when 'IsMarkedCharsMax' then 3 else 4 end), DopAsked;
+
+select * from #r order by Variant, DopAsked, Run;
+go
+-- Diagnostic: a real parser, taken as a string and as a streamed SqlChars, over descriptions shaped like
+-- a parcel table's legal descriptions: half are 56 characters or fewer, 1 in 100 over 566, 1 in 1,000
+-- over 1,651, the longest 5,120, and 1 in 50 ends in a match. CPU, spins and the CLR's own count of
+-- memory allocated, at DOP 1 up to the machine's maximum, after a check that every variant returns what
+-- the string parser does.
+
+create function dbo.ParseMaxAll(@s nvarchar(max), @startDelim nvarchar(max), @endDelim nvarchar(max)) returns nvarchar(max)
+as external name ClrSpin.[ClrSpin.Functions].ParseFromEnd;
+go
+create function dbo.ParseMaxText(@s nvarchar(max), @startDelim nvarchar(4000), @endDelim nvarchar(4000)) returns nvarchar(max)
+as external name ClrSpin.[ClrSpin.Functions].ParseFromEnd;
+go
+create function dbo.ParseCharsText(@s nvarchar(max), @startDelim nvarchar(4000), @endDelim nvarchar(4000)) returns nvarchar(max)
+as external name ClrSpin.[ClrSpin.Functions].ParseFromEndChars;
+go
+create function dbo.Parse4000(@s nvarchar(4000), @startDelim nvarchar(4000), @endDelim nvarchar(4000)) returns nvarchar(4000)
+as external name ClrSpin.[ClrSpin.Functions].ParseFromEnd;
+go
+
+create table dbo.D (
+    ID int not null,
+    Description varchar(5120) not null
+);
+
+with N as (
+    select top (2000000) n = row_number() over (order by (select null))
+    from sys.all_columns a cross join sys.all_columns b cross join sys.all_columns c
+), L as (
+    select
+        n,
+        len = case
+            when n % 1000 < 500 then 20 + n % 37
+            when n % 1000 < 900 then 57 + n % 109
+            when n % 1000 < 990 then 166 + n % 401
+            when n % 1000 < 999 then 567 + n % 1085
+            else 1652 + n % 3469
+        end
+    from N
+)
+insert dbo.D with (tablock)
+select
+    n,
+    case
+        when n % 50 = 0 then left(replicate(convert(varchar(max), 'LOT 5 BLK 3 '), len / 12 + 1), len - 20) + ' SUNNY HILLS 2ND ADD'
+        else left(replicate(convert(varchar(max), 'LOT 5 BLK 3 '), len / 12 + 1), len)
+    end
+from L;
+go
+
+-- every variant must return what the string parser returns; Parse4000 is expected to differ only on the
+-- few descriptions over 4,000 characters, which its parameter cuts short
+select
+    Rows = count(*),
+    Matches = sum(case when dbo.ParseMaxAll(Description, N' ', N'ND ADD') is not null then 1 else 0 end),
+    MaxTextDiffers = sum(case when isnull(dbo.ParseMaxText(Description, N' ', N'ND ADD'), N'~') <> isnull(dbo.ParseMaxAll(Description, N' ', N'ND ADD'), N'~') then 1 else 0 end),
+    CharsDiffers = sum(case when isnull(dbo.ParseCharsText(Description, N' ', N'ND ADD'), N'~') <> isnull(dbo.ParseMaxAll(Description, N' ', N'ND ADD'), N'~') then 1 else 0 end),
+    Parse4000Differs = sum(case when isnull(dbo.Parse4000(Description, N' ', N'ND ADD'), N'~') <> isnull(dbo.ParseMaxAll(Description, N' ', N'ND ADD'), N'~') then 1 else 0 end),
+    Over4000 = sum(case when len(Description) > 4000 then 1 else 0 end)
+from dbo.D
+option (maxdop 4);
+go
+
+create table #p (
+    Variant varchar(20) not null,
+    DopAsked int not null,
+    Run int not null,
+    DopUsed int null,
+    ElapsedMs int not null,
+    CpuMs int null,
+    AllocKb bigint null,
+    SelistSpins bigint null,
+    CachestoreSpins bigint null,
+    DiagSpins bigint null
+);
+select top 0 name, spins into #pspin0 from sys.dm_os_spinlock_stats;
+go
+
+declare @variants table (Ord int not null primary key, Variant varchar(20) not null, Fn nvarchar(100) not null);
+insert @variants values
+    (1, 'ParseMaxAll', N'dbo.ParseMaxAll'),
+    (2, 'ParseMaxText', N'dbo.ParseMaxText'),
+    (3, 'ParseCharsText', N'dbo.ParseCharsText'),
+    (4, 'Parse4000', N'dbo.Parse4000');
+
+declare @maxdop int = (select count(*) from sys.dm_os_schedulers where status = 'VISIBLE ONLINE');
+declare @dops table (Dop int not null primary key);
+insert @dops select distinct d from (values (1), (4), (8), (@maxdop)) v(d) where d <= @maxdop;
+
+declare @variant varchar(20), @fn nvarchar(100), @dop int, @run int, @sql nvarchar(max), @marker nvarchar(100);
+declare @n int, @t0 datetime2(7), @elapsed int, @alloc0 bigint;
+
+declare c cursor local fast_forward for
+select V.Variant, V.Fn, D.Dop, R.Run
+from @variants V cross join @dops D cross join (values (1), (2), (3)) R(Run)
+order by V.Ord, D.Dop, R.Run;
+open c;
+fetch c into @variant, @fn, @dop, @run;
+while @@fetch_status = 0 begin
+    set @marker = N'/*clrspin parse ' + @variant + N' dop' + convert(nvarchar(4), @dop) + N' run' + convert(nvarchar(4), @run) + N'*/';
+    set @sql = N'select @n = count(*) ' + @marker + N' from dbo.D where ' + @fn + N'(Description, N'' '', N''ND ADD'') is not null'
+        + N' option (maxdop ' + convert(nvarchar(4), @dop) + N', use hint (''ENABLE_PARALLEL_PLAN_PREFERENCE''))';
+
+    truncate table #pspin0;
+    insert #pspin0 select name, spins from sys.dm_os_spinlock_stats;
+    set @alloc0 = (select sum(total_allocated_memory_kb) from sys.dm_clr_appdomains where db_id = db_id());
+    set @t0 = sysdatetime();
+    exec sys.sp_executesql @sql, N'@n int output', @n = @n output;
+    set @elapsed = datediff(millisecond, @t0, sysdatetime());
+
+    insert #p
+    select
+        @variant, @dop, @run,
+        (select top 1 qs.last_dop from sys.dm_exec_query_stats qs cross apply sys.dm_exec_sql_text(qs.sql_handle) st
+            where st.text like N'%' + @marker + N'%' and st.text not like N'%dm_exec_query_stats%'),
+        @elapsed,
+        (select top 1 qs.last_worker_time / 1000 from sys.dm_exec_query_stats qs cross apply sys.dm_exec_sql_text(qs.sql_handle) st
+            where st.text like N'%' + @marker + N'%' and st.text not like N'%dm_exec_query_stats%'),
+        (select sum(total_allocated_memory_kb) from sys.dm_clr_appdomains where db_id = db_id()) - @alloc0,
+        (select s.spins - s0.spins from sys.dm_os_spinlock_stats s join #pspin0 s0 on s0.name = s.name where s.name = 'SOS_SELIST_SIZED_SLOCK'),
+        (select s.spins - s0.spins from sys.dm_os_spinlock_stats s join #pspin0 s0 on s0.name = s.name where s.name = 'SOS_CACHESTORE'),
+        (select s.spins - s0.spins from sys.dm_os_spinlock_stats s join #pspin0 s0 on s0.name = s.name where s.name = 'DIAG_OBJECT');
+
+    fetch c into @variant, @fn, @dop, @run;
+end
+close c;
+deallocate c;
+go
+
+-- run 1 of each warms the plan; runs 2 and 3 are averaged
+select
+    Variant,
+    DopAsked,
+    DopUsed = max(DopUsed),
+    ElapsedMs = avg(ElapsedMs),
+    CpuMs = avg(CpuMs),
+    CpuUsPerRow = convert(decimal(9, 2), avg(CpuMs) * 1000.0 / 2000000),
+    AllocKb = avg(AllocKb),
+    AllocBytesPerRow = convert(decimal(9, 1), avg(AllocKb) * 1024.0 / 2000000),
+    SelistSpins = avg(SelistSpins),
+    CachestoreSpins = avg(CachestoreSpins),
+    DiagSpins = avg(DiagSpins)
+from #p
+where Run > 1
+group by Variant, DopAsked
+order by min(case Variant when 'ParseMaxAll' then 1 when 'ParseMaxText' then 2 when 'ParseCharsText' then 3 else 4 end), DopAsked;
+
+select * from #p order by Variant, DopAsked, Run;
+go
+
+use master;
+go
+-- another connection still in the database, such as a second SSMS window or Object Explorer, would
+-- stop the drop, so they are disconnected first
+if db_id(N'ClrSpinRepro') is not null begin
+    alter database ClrSpinRepro set single_user with rollback immediate;
+    drop database ClrSpinRepro;
+end
+go
+-- every trust this repro added, whichever build of the assembly it was for
+declare @hash varbinary(64);
+declare t cursor local fast_forward for
+select hash from sys.trusted_assemblies where description = N'ClrSpinRepro';
+open t;
+fetch t into @hash;
+while @@fetch_status = 0 begin
+    exec sys.sp_drop_trusted_assembly @hash = @hash;
+    fetch t into @hash;
+end
+close t;
+deallocate t;
+go
+select
+    ClrSpinReproLeft = case when db_id(N'ClrSpinRepro') is null then 0 else 1 end,
+    TrustsLeft = (select count(*) from sys.trusted_assemblies where description = N'ClrSpinRepro');
+go
