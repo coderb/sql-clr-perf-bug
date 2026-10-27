@@ -125,6 +125,8 @@ The scripts:
   profiling and Query Store each on and off.
 - **[`sql/threads.sql`](../sql/threads.sql):** `AddOne` at DOP 4, 8, 10, 12, 16, 20 and 24, capturing each run's actual plan
   to divide its rows and CPU among the threads.
+- **[`sql/split.sql`](../sql/split.sql):** `AddOne`'s rows spread by ID across 1, 4 and 24 separately declared SQL functions
+  over the same method, at DOP 4, 8, 12, 16, 20 and 24.
 
 The spinlock counters are server-wide, so a busy server adds noise. In our runs, the three runs of
 each test agreed closely.
@@ -251,6 +253,31 @@ scan alone took 14 to 57 ms per thread. Elapsed is the coordinator thread's, at 
 The capture adds per-operator timing to the runs it watches: over two runs, the CPU summed to
 between 5% below and 21% above what `repro.sql` measured at the same DOP, so these figures compare
 with one another more closely than with the tables above. The row counts are exact.
+
+### Spreading the calls across several functions (`split.sql`)
+
+Spreading `AddOne`'s rows by ID across separately declared SQL functions over the same method does
+not relieve the contention. From DOP 12 to 24, 1, 4 and 24 copies took CPU within 6% of one another,
+and `DIAG_OBJECT` spun on the same scale: 172 to 181 million spins at DOP 24, with any number of
+copies. So the spinlock is not held per function; one shared by the query's threads would explain
+it.
+
+CPU in ms, runs 2 and 3 averaged, on CU10:
+
+| DOP | 1 copy | 4 copies | 24 copies |
+|---|---|---|---|
+| 4 | 605 | 553 | 759 |
+| 8 | 3,910 | 4,033 | 2,972 |
+| 12 | 6,540 | 6,596 | 6,391 |
+| 16 | 9,490 | 9,342 | 9,006 |
+| 20 | 12,384 | 12,313 | 11,946 |
+| 24 | 15,636 | 15,165 | 15,326 |
+
+- **At DOP 8,** 24 copies averaged less CPU, but its three runs ranged from 2,559 to 3,446 ms.
+- **At DOP 4,** 24 copies cost more, since each row goes through a 24-way `case`.
+- **Each row calls one copy,** since `case` evaluates only the branch that matches.
+  `sys.dm_exec_function_stats` could have confirmed the split by call counts, but on this server it
+  lists no CLR function, only T-SQL ones.
 
 ## What we would like to know
 

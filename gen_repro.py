@@ -1,10 +1,11 @@
-"""Writes sql/repro.sql, sql/diag.sql, sql/diagconfig.sql, sql/threads.sql and sql/cleanup.sql from
-sql/parts, embedding the built ClrSpin.dll as hex.
+"""Writes sql/repro.sql, sql/diag.sql, sql/diagconfig.sql, sql/threads.sql, sql/split.sql and sql/cleanup.sql
+from sql/parts, embedding the built ClrSpin.dll as hex.
 
 repro.sql measures every function at a range of DOPs; diag.sql records what contends at DOP 4 and at
 the machine's maximum; diagconfig.sql repeats one function under the scratch database's diagnostics
-settings; threads.sql divides one function's rows and CPU among the threads of its parallel plans. All
-share the setup and teardown parts; cleanup.sql is the teardown alone.
+settings; threads.sql divides one function's rows and CPU among the threads of its parallel plans;
+split.sql spreads one function's rows across several declarations of it. All share the setup and
+teardown parts; cleanup.sql is the teardown alone.
 """
 import hashlib
 import sys
@@ -20,6 +21,7 @@ SCRIPTS = {
     'diag.sql': ['10-setup.sql', '30-diag.sql', '90-teardown.sql'],
     'diagconfig.sql': ['10-setup.sql', '40-diag-config.sql', '90-teardown.sql'],
     'threads.sql': ['10-setup.sql', '50-threads.sql', '90-teardown.sql'],
+    'split.sql': ['10-setup.sql', '60-split.sql', '90-teardown.sql'],
 }
 
 
