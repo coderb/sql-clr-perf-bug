@@ -123,6 +123,8 @@ The scripts:
   that changed.
 - **[`sql/diagconfig.sql`](../sql/diagconfig.sql):** `AddOne` at DOP 4 and 24 with the repro database's lightweight query
   profiling and Query Store each on and off.
+- **[`sql/threads.sql`](../sql/threads.sql):** `AddOne` at DOP 4, 8, 10, 12, 16, 20 and 24, capturing each run's actual plan
+  to divide its rows and CPU among the threads.
 
 The spinlock counters are server-wide, so a busy server adds noise. In our runs, the three runs of
 each test agreed closely.
@@ -220,6 +222,35 @@ The spins are `DIAG_OBJECT`'s. At DOP 4 on CU10, the same runs took 437 to 628 m
 The Extended Events sessions running during these tests were `system_health`, the
 `sp_server_diagnostics` session and `hkenginexesession`. None of them collects an event raised on
 each function call.
+
+### How the work divides among threads (`threads.sql`)
+
+Every worker thread is busy for the whole query: on each one, the CPU of the Filter that calls
+`AddOne` is within 8 ms of its elapsed time. From DOP 8 up the query takes about the same time,
+566 to 659 ms against 136 ms at DOP 4, so each thread added past DOP 4 adds CPU and no speed. That
+includes DOP 10 and 12, at or under the machine's 12 cores.
+
+The rows divide close to evenly. The scan hands them out in chunks of 30,464 rows, and every thread
+gets a whole number of chunks, except the one that takes the last, partial chunk. At DOP 24 that
+is 2 or 3 chunks per thread, which is all the spread at that DOP comes from.
+
+`AddOne` on CU10, from run 2 of two at each DOP:
+
+| DOP | Rows per thread | CPU per thread (ms) | CPU (ms) | CPU per call (µs) | Elapsed (ms) |
+|---|---|---|---|---|---|
+| 4 | 487,424 to 517,888 | 133 to 135 | 535 | 0.27 | 136 |
+| 8 | 233,088 to 274,176 | 542 to 571 | 4,506 | 2.25 | 572 |
+| 10 | 152,320 to 243,712 | 549 to 565 | 5,597 | 2.80 | 566 |
+| 12 | 152,320 to 182,784 | 539 to 580 | 6,822 | 3.41 | 580 |
+| 16 | 91,392 to 152,320 | 560 to 608 | 9,443 | 4.72 | 609 |
+| 20 | 91,392 to 121,856 | 583 to 652 | 12,643 | 6.32 | 653 |
+| 24 | 60,928 to 91,392 | 532 to 659 | 15,073 | 7.54 | 659 |
+
+The CPU is the Filter operator's on each worker thread, which includes the scan beneath it; the
+scan alone took 14 to 57 ms per thread. Elapsed is the coordinator thread's, at the top of the plan.
+The capture adds per-operator timing to the runs it watches: over two runs, the CPU summed to
+between 5% below and 21% above what `repro.sql` measured at the same DOP, so these figures compare
+with one another more closely than with the tables above. The row counts are exact.
 
 ## What we would like to know
 
